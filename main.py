@@ -97,6 +97,8 @@ def get_args_parser():
     parser.add_argument('--room_cls_loss_coef', default=0.2, type=float)
     parser.add_argument('--coords_loss_coef', default=5, type=float)
     parser.add_argument('--raster_loss_coef', default=1, type=float)
+    parser.add_argument('--manhattan_loss_coef', default=0.05, type=float,
+                        help='Coefficient for the Manhattan orthogonality regularization loss')
 
     # dataset parameters
     parser.add_argument('--dataset_name', default='stru3d')
@@ -274,7 +276,9 @@ def main(args):
                 "train/loss": train_stats['loss'],
                 "train/loss_ce": train_stats['loss_ce'],
                 "train/loss_coords": train_stats['loss_coords'],
+                "train/loss_manhattan": train_stats['loss_manhattan'],
                 "train/loss_coords_unscaled": train_stats['loss_coords_unscaled'],
+                "train/loss_manhattan_unscaled": train_stats['loss_manhattan_unscaled'],
                 "train/cardinality_error": train_stats['cardinality_error_unscaled']
                 }
 
@@ -282,7 +286,9 @@ def main(args):
                 "val/loss": test_stats['loss'],
                 "val/loss_ce": test_stats['loss_ce'],
                 "val/loss_coords": test_stats['loss_coords'],
+                "val/loss_manhattan": test_stats['loss_manhattan'],
                 "val/loss_coords_unscaled": test_stats['loss_coords_unscaled'],
+                "val/loss_manhattan_unscaled": test_stats['loss_manhattan_unscaled'],
                 "val/cardinality_error": test_stats['cardinality_error_unscaled'],
                 "val_metrics/room_prec": test_stats['room_prec'],
                 "val_metrics/room_rec": test_stats['room_rec'],
