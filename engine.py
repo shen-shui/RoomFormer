@@ -26,6 +26,13 @@ from util.plot_utils import plot_room_map, plot_score_map, plot_floorplan_with_r
 options = MCSSOptions()
 opts = options.parse()
 
+def _get_model_inputs(batched_inputs, device):
+    images = [x["image"].to(device) for x in batched_inputs]
+    if "depth" not in batched_inputs[0]:
+        return images
+    depths = [x["depth"].to(device) for x in batched_inputs]
+    return {"image": images, "depth": depths}
+
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0):
@@ -38,7 +45,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     print_freq = 10
 
     for batched_inputs in metric_logger.log_every(data_loader, print_freq, header):
-        samples = [x["image"].to(device) for x in batched_inputs]
+        samples = _get_model_inputs(batched_inputs, device)
         gt_instances = [x["instances"].to(device) for x in batched_inputs]
         room_targets = pad_gt_polys(gt_instances, model.num_queries_per_poly, device)
 
@@ -86,7 +93,7 @@ def evaluate(model, criterion, dataset_name, data_loader, device):
 
     for batched_inputs in metric_logger.log_every(data_loader, 10, header):
 
-        samples = [x["image"].to(device) for x in batched_inputs]
+        samples = _get_model_inputs(batched_inputs, device)
         scene_ids = [x["image_id"]for x in batched_inputs]
         gt_instances = [x["instances"].to(device) for x in batched_inputs]
         room_targets = pad_gt_polys(gt_instances, model.num_queries_per_poly, device)
@@ -213,7 +220,7 @@ def evaluate_floor(model, dataset_name, data_loader, device, output_dir, plot_pr
 
     for batched_inputs in data_loader:
 
-        samples = [x["image"].to(device) for x in batched_inputs]
+        samples = _get_model_inputs(batched_inputs, device)
         scene_ids = [x["image_id"] for x in batched_inputs]
         gt_instances = [x["instances"].to(device) for x in batched_inputs]
 

@@ -22,7 +22,8 @@ def _get_clones(module, N):
 class RoomFormer(nn.Module):
     """ This is the RoomFormer module that performs floorplan reconstruction """
     def __init__(self, backbone, transformer, num_classes, num_queries, num_polys, num_feature_levels,
-                 aux_loss=True, with_poly_refine=False, masked_attn=False, semantic_classes=-1):
+                 aux_loss=True, with_poly_refine=False, masked_attn=False, semantic_classes=-1,
+                 depth_backbone=None, use_cross_modal_depth=False):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -44,32 +45,18 @@ class RoomFormer(nn.Module):
         self.class_embed = nn.Linear(hidden_dim, num_classes)
         self.coords_embed = MLP(hidden_dim, hidden_dim, 2, 3)
         self.num_feature_levels = num_feature_levels
+        self.use_cross_modal_depth = use_cross_modal_depth
 
         self.query_embed = nn.Embedding(num_queries, 2)
         self.tgt_embed = nn.Embedding(num_queries, hidden_dim)
-        if num_feature_levels > 1:
-            num_backbone_outs = len(backbone.strides)
-            input_proj_list = []
-            for _ in range(num_backbone_outs):
-                in_channels = backbone.num_channels[_]
-                input_proj_list.append(nn.Sequential(
-                    nn.Conv2d(in_channels, hidden_dim, kernel_size=1),
-                    nn.GroupNorm(32, hidden_dim),
-                ))
-            for _ in range(num_feature_levels - num_backbone_outs):
-                input_proj_list.append(nn.Sequential(
-                    nn.Conv2d(in_channels, hidden_dim, kernel_size=3, stride=2, padding=1),
-                    nn.GroupNorm(32, hidden_dim),
-                ))
-                in_channels = hidden_dim
-            self.input_proj = nn.ModuleList(input_proj_list)
-        else:
-            self.input_proj = nn.ModuleList([
-                nn.Sequential(
-                    nn.Conv2d(backbone.num_channels[0], hidden_dim, kernel_size=1),
-                    nn.GroupNorm(32, hidden_dim),
-                )])
+        self.input_proj = self._build_input_proj(backbone, hidden_dim, num_feature_levels)
         self.backbone = backbone
+        self.depth_backbone = depth_backbone
+        self.depth_input_proj = None
+        if self.use_cross_modal_depth:
+            assert self.depth_backbone is not None
+            self.depth_input_proj = self._build_input_proj(self.depth_backbone, hidden_dim, num_feature_levels)
+
         self.aux_loss = aux_loss
         self.with_poly_refine = with_poly_refine
 
@@ -78,12 +65,12 @@ class RoomFormer(nn.Module):
         self.class_embed.bias.data = torch.ones(num_classes) * bias_value
         nn.init.constant_(self.coords_embed.layers[-1].weight.data, 0)
         nn.init.constant_(self.coords_embed.layers[-1].bias.data, 0)
-        for proj in self.input_proj:
-            nn.init.xavier_uniform_(proj[0].weight, gain=1)
-            nn.init.constant_(proj[0].bias, 0)
+        self._init_input_proj(self.input_proj)
+        if self.depth_input_proj is not None:
+            self._init_input_proj(self.depth_input_proj)
 
         num_pred = transformer.decoder.num_layers
-        
+
         if with_poly_refine:
             self.class_embed = _get_clones(self.class_embed, num_pred)
             self.coords_embed = _get_clones(self.coords_embed, num_pred)
@@ -95,7 +82,7 @@ class RoomFormer(nn.Module):
 
         self.transformer.decoder.coords_embed = self.coords_embed
         self.transformer.decoder.class_embed = self.class_embed
-        
+
         # Semantically-rich floorplan
         self.room_class_embed = None
         if semantic_classes > 0:
@@ -113,7 +100,66 @@ class RoomFormer(nn.Module):
         else:
             self.attention_mask = None
 
-    def forward(self, samples: NestedTensor):
+    def _build_input_proj(self, backbone, hidden_dim, num_feature_levels):
+        if num_feature_levels > 1:
+            num_backbone_outs = len(backbone.strides)
+            input_proj_list = []
+            for _ in range(num_backbone_outs):
+                in_channels = backbone.num_channels[_]
+                input_proj_list.append(nn.Sequential(
+                    nn.Conv2d(in_channels, hidden_dim, kernel_size=1),
+                    nn.GroupNorm(32, hidden_dim),
+                ))
+            for _ in range(num_feature_levels - num_backbone_outs):
+                input_proj_list.append(nn.Sequential(
+                    nn.Conv2d(in_channels, hidden_dim, kernel_size=3, stride=2, padding=1),
+                    nn.GroupNorm(32, hidden_dim),
+                ))
+                in_channels = hidden_dim
+            return nn.ModuleList(input_proj_list)
+        else:
+            return nn.ModuleList([
+                nn.Sequential(
+                    nn.Conv2d(backbone.num_channels[0], hidden_dim, kernel_size=1),
+                    nn.GroupNorm(32, hidden_dim),
+                )])
+
+    def _init_input_proj(self, input_proj):
+        for proj in input_proj:
+            nn.init.xavier_uniform_(proj[0].weight, gain=1)
+            nn.init.constant_(proj[0].bias, 0)
+
+    def _as_nested_tensor(self, samples):
+        if isinstance(samples, NestedTensor):
+            return samples
+        return nested_tensor_from_tensor_list(samples)
+
+    def _extract_projected_features(self, samples, backbone, input_proj):
+        features, pos = backbone(samples)
+
+        srcs = []
+        masks = []
+        for l, feat in enumerate(features):
+            src, mask = feat.decompose()
+            srcs.append(input_proj[l](src))
+            masks.append(mask)
+            assert mask is not None
+        if self.num_feature_levels > len(srcs):
+            _len_srcs = len(srcs)
+            for l in range(_len_srcs, self.num_feature_levels):
+                if l == _len_srcs:
+                    src = input_proj[l](features[-1].tensors)
+                else:
+                    src = input_proj[l](srcs[-1])
+                m = samples.mask
+                mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
+                pos_l = backbone[1](NestedTensor(src, mask)).to(src.dtype)
+                srcs.append(src)
+                masks.append(mask)
+                pos.append(pos_l)
+        return srcs, masks, pos
+
+    def forward(self, samples):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensors: batched images, of shape [batch_size x C x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
@@ -127,38 +173,39 @@ class RoomFormer(nn.Module):
                - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
                                 dictionnaries containing the two above keys for each decoder layer.
         """
-        if not isinstance(samples, NestedTensor):
-            samples = nested_tensor_from_tensor_list(samples)
-        features, pos = self.backbone(samples)
+        depth_samples = None
+        if isinstance(samples, dict):
+            depth_samples = self._as_nested_tensor(samples["depth"])
+            samples = samples["image"]
 
-        bs = samples.tensors.shape[0]
-        srcs = []
-        masks = []
-        for l, feat in enumerate(features):
-            src, mask = feat.decompose()
-            srcs.append(self.input_proj[l](src))
-            masks.append(mask)
-            assert mask is not None
-        if self.num_feature_levels > len(srcs):
-            _len_srcs = len(srcs)
-            for l in range(_len_srcs, self.num_feature_levels):
-                if l == _len_srcs:
-                    src = self.input_proj[l](features[-1].tensors)
-                else:
-                    src = self.input_proj[l](srcs[-1])
-                m = samples.mask
-                mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
-                pos_l = self.backbone[1](NestedTensor(src, mask)).to(src.dtype)
-                srcs.append(src)
-                masks.append(mask)
-                pos.append(pos_l)
+        samples = self._as_nested_tensor(samples)
+        srcs, masks, pos = self._extract_projected_features(samples, self.backbone, self.input_proj)
+
+        cross_srcs = None
+        cross_masks = None
+        cross_pos = None
+        if self.use_cross_modal_depth:
+            assert depth_samples is not None, "Cross-modal depth is enabled but no depth input was provided."
+            cross_srcs, cross_masks, cross_pos = self._extract_projected_features(
+                depth_samples, self.depth_backbone, self.depth_input_proj)
 
 
         query_embeds = self.query_embed.weight
         tgt_embeds = self.tgt_embed.weight
         
-        hs, init_reference, inter_references, inter_classes = self.transformer(srcs, masks, pos, query_embeds, tgt_embeds, self.attention_mask)
+        hs, init_reference, inter_references, inter_classes = self.transformer(
+            srcs,
+            masks,
+            pos,
+            query_embeds,
+            tgt_embeds,
+            self.attention_mask,
+            cross_srcs=cross_srcs,
+            cross_masks=cross_masks,
+            cross_pos_embeds=cross_pos,
+        )
 
+        bs = samples.tensors.shape[0]
         num_layer = hs.shape[0]
         outputs_class = inter_classes.reshape(num_layer, bs, self.num_polys, self.num_queries_per_poly)
         outputs_coord = inter_references.reshape(num_layer, bs, self.num_polys, self.num_queries_per_poly, 2)
@@ -360,7 +407,8 @@ class MLP(nn.Module):
 def build(args, train=True):
     num_classes = 1 # valid or invalid corner
 
-    backbone = build_backbone(args)
+    backbone = build_backbone(args, input_channels=getattr(args, "input_channels", 1))
+    depth_backbone = build_backbone(args, input_channels=1) if getattr(args, "use_cross_modal_depth", False) else None
     transformer = build_deforamble_transformer(args)
     model = RoomFormer(
         backbone,
@@ -372,7 +420,9 @@ def build(args, train=True):
         aux_loss=args.aux_loss,
         with_poly_refine=args.with_poly_refine,
         masked_attn=args.masked_attn,
-        semantic_classes=args.semantic_classes
+        semantic_classes=args.semantic_classes,
+        depth_backbone=depth_backbone,
+        use_cross_modal_depth=getattr(args, "use_cross_modal_depth", False),
     )
 
     if not train:

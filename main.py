@@ -73,6 +73,10 @@ def get_args_parser():
                         help="iteratively refine reference points (i.e. positional part of polygon queries)")
     parser.add_argument('--masked_attn', default=False, action='store_true',
                         help="if true, the query in one room will not be allowed to attend other room")
+    parser.add_argument('--use_cross_modal_attention', action='store_true',
+                        help='Insert cross-modal attention into the Transformer encoder')
+    parser.add_argument('--use_cross_modal_depth', action='store_true',
+                        help='Use a second depth backbone and feed depth features to encoder cross-modal attention')
     parser.add_argument('--semantic_classes', default=-1, type=int,
                         help="Number of classes for semantically-rich floorplan:  \
                         1. default -1 means non-semantic floorplan \
@@ -97,6 +101,10 @@ def get_args_parser():
     # dataset parameters
     parser.add_argument('--dataset_name', default='stru3d')
     parser.add_argument('--dataset_root', default='data/stru3d', type=str)
+    parser.add_argument('--input_channels', default=1, type=int,
+                        help='Number of channels used by the primary image backbone')
+    parser.add_argument('--depth_root', default='', type=str,
+                        help='Optional root containing train/val/test depth maps with COCO file names')
 
     parser.add_argument('--output_dir', default='output',
                         help='path where to save, empty for no saving')

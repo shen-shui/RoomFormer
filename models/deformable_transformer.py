@@ -32,7 +32,8 @@ class DeformableTransformer(nn.Module):
     def __init__(self, d_model=256, nhead=8,
                  num_encoder_layers=6, num_decoder_layers=6, dim_feedforward=1024, dropout=0.1,
                  activation="relu", poly_refine=True, return_intermediate_dec=False, aux_loss=False,
-                 num_feature_levels=4, dec_n_points=4, enc_n_points=4, query_pos_type="none"):
+                 num_feature_levels=4, dec_n_points=4, enc_n_points=4, query_pos_type="none",
+                 use_cross_modal_attention=False):
         super().__init__()
 
         self.d_model = d_model
@@ -40,7 +41,8 @@ class DeformableTransformer(nn.Module):
 
         encoder_layer = DeformableTransformerEncoderLayer(d_model, dim_feedforward,
                                                           dropout, activation,
-                                                          num_feature_levels, nhead, enc_n_points)
+                                                          num_feature_levels, nhead, enc_n_points,
+                                                          use_cross_modal_attention)
         self.encoder = DeformableTransformerEncoder(encoder_layer, num_encoder_layers)
 
         decoder_layer = DeformableTransformerDecoderLayer(d_model, dim_feedforward,
@@ -74,10 +76,7 @@ class DeformableTransformer(nn.Module):
         valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
         return valid_ratio
 
-    def forward(self, srcs, masks, pos_embeds, query_embed=None, tgt=None, tgt_masks=None):
-        assert query_embed is not None
-
-        # prepare input for encoder
+    def _flatten_encoder_inputs(self, srcs, masks, pos_embeds):
         src_flatten = []
         mask_flatten = []
         lvl_pos_embed_flatten = []
@@ -99,9 +98,35 @@ class DeformableTransformer(nn.Module):
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
         valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
+        return src_flatten, mask_flatten, lvl_pos_embed_flatten, spatial_shapes, level_start_index, valid_ratios
+
+    def forward(self, srcs, masks, pos_embeds, query_embed=None, tgt=None, tgt_masks=None,
+                cross_srcs=None, cross_masks=None, cross_pos_embeds=None):
+        assert query_embed is not None
+
+        # prepare input for encoder
+        src_flatten, mask_flatten, lvl_pos_embed_flatten, spatial_shapes, level_start_index, valid_ratios = \
+            self._flatten_encoder_inputs(srcs, masks, pos_embeds)
+
+        cross_src_flatten = None
+        cross_mask_flatten = None
+        cross_pos_flatten = None
+        if cross_srcs is not None:
+            cross_src_flatten, cross_mask_flatten, cross_pos_flatten, _, _, _ = \
+                self._flatten_encoder_inputs(cross_srcs, cross_masks, cross_pos_embeds)
 
         # encoder
-        memory = self.encoder(src_flatten, spatial_shapes, level_start_index, valid_ratios, lvl_pos_embed_flatten, mask_flatten)
+        memory = self.encoder(
+            src_flatten,
+            spatial_shapes,
+            level_start_index,
+            valid_ratios,
+            lvl_pos_embed_flatten,
+            mask_flatten,
+            cross_src=cross_src_flatten,
+            cross_pos=cross_pos_flatten,
+            cross_padding_mask=cross_mask_flatten,
+        )
 
         # prepare input for decoder
         bs, _, c = memory.shape
@@ -122,13 +147,21 @@ class DeformableTransformerEncoderLayer(nn.Module):
     def __init__(self,
                  d_model=256, d_ffn=1024,
                  dropout=0.1, activation="relu",
-                 n_levels=4, n_heads=8, n_points=4):
+                 n_levels=4, n_heads=8, n_points=4,
+                 use_cross_modal_attention=False):
         super().__init__()
+        self.use_cross_modal_attention = use_cross_modal_attention
 
         # self attention
         self.self_attn = MSDeformAttn(d_model, n_levels, n_heads, n_points)
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
+
+        # cross-modal attention: primary modality queries depth/geometric tokens.
+        if self.use_cross_modal_attention:
+            self.cross_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+            self.dropout_cross = nn.Dropout(dropout)
+            self.norm_cross = nn.LayerNorm(d_model)
 
         # ffn
         self.linear1 = nn.Linear(d_model, d_ffn)
@@ -148,11 +181,20 @@ class DeformableTransformerEncoderLayer(nn.Module):
         src = self.norm2(src)
         return src
 
-    def forward(self, src, pos, reference_points, spatial_shapes, level_start_index, padding_mask=None):
+    def forward(self, src, pos, reference_points, spatial_shapes, level_start_index, padding_mask=None,
+                cross_src=None, cross_pos=None, cross_padding_mask=None):
         # self attention
         src2 = self.self_attn(self.with_pos_embed(src, pos), reference_points, src, spatial_shapes, level_start_index, padding_mask)
         src = src + self.dropout1(src2)
         src = self.norm1(src)
+
+        # cross-modal attention
+        if self.use_cross_modal_attention and cross_src is not None:
+            query = self.with_pos_embed(src, pos)
+            key = self.with_pos_embed(cross_src, cross_pos)
+            src2 = self.cross_attn(query, key, cross_src, key_padding_mask=cross_padding_mask)[0]
+            src = src + self.dropout_cross(src2)
+            src = self.norm_cross(src)
 
         # ffn
         src = self.forward_ffn(src)
@@ -181,11 +223,22 @@ class DeformableTransformerEncoder(nn.Module):
         reference_points = reference_points[:, :, None] * valid_ratios[:, None]
         return reference_points
 
-    def forward(self, src, spatial_shapes, level_start_index, valid_ratios, pos=None, padding_mask=None):
+    def forward(self, src, spatial_shapes, level_start_index, valid_ratios, pos=None, padding_mask=None,
+                cross_src=None, cross_pos=None, cross_padding_mask=None):
         output = src
         reference_points = self.get_reference_points(spatial_shapes, valid_ratios, device=src.device)
         for _, layer in enumerate(self.layers):
-            output = layer(output, pos, reference_points, spatial_shapes, level_start_index, padding_mask)
+            output = layer(
+                output,
+                pos,
+                reference_points,
+                spatial_shapes,
+                level_start_index,
+                padding_mask,
+                cross_src=cross_src,
+                cross_pos=cross_pos,
+                cross_padding_mask=cross_padding_mask,
+            )
 
         return output
 
@@ -360,6 +413,8 @@ def build_deforamble_transformer(args):
         num_feature_levels=args.num_feature_levels,
         dec_n_points=args.dec_n_points,
         enc_n_points=args.enc_n_points,
-        query_pos_type=args.query_pos_type)
-
-
+        query_pos_type=args.query_pos_type,
+        use_cross_modal_attention=(
+            getattr(args, "use_cross_modal_attention", False)
+            or getattr(args, "use_cross_modal_depth", False)
+        ))
