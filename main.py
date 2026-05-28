@@ -16,6 +16,23 @@ from engine import evaluate, train_one_epoch
 from models import build_model
 
 
+def expand_cross_modal_pretrained_state(model, state_dict):
+    """Reuse RoomFormer weights for the new depth stream where shapes match."""
+    model_state = model.state_dict()
+    expanded = dict(state_dict)
+    prefix_pairs = [
+        ('backbone.', 'depth_backbone.'),
+        ('input_proj.', 'depth_input_proj.'),
+    ]
+    for src_prefix, dst_prefix in prefix_pairs:
+        for key, value in state_dict.items():
+            if not key.startswith(src_prefix):
+                continue
+            dst_key = dst_prefix + key[len(src_prefix):]
+            if dst_key in model_state and model_state[dst_key].shape == value.shape:
+                expanded[dst_key] = value
+    return expanded
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser('RoomFormer', add_help=False)
@@ -114,6 +131,14 @@ def get_args_parser():
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=42, type=int)
     parser.add_argument('--resume', default='', help='resume from checkpoint')
+    parser.add_argument('--pretrained_model', default='',
+                        help='load model weights for initialization without restoring optimizer/scheduler')
+    parser.add_argument('--freeze_pretrained', action='store_true',
+                        help='freeze pretrained RoomFormer modules and train only modules matched by trainable_keywords')
+    parser.add_argument('--trainable_keywords',
+                        default=['depth_backbone', 'depth_input_proj', 'cross_attn', 'norm_cross'],
+                        type=str, nargs='+',
+                        help='parameter name keywords kept trainable when --freeze_pretrained is set')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--num_workers', default=2, type=int)
@@ -143,6 +168,34 @@ def main(args):
 
     # build model
     model, criterion = build_model(args)
+
+    if args.pretrained_model:
+        checkpoint = torch.load(args.pretrained_model, map_location='cpu')
+        state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
+        state_dict = expand_cross_modal_pretrained_state(model, state_dict)
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        unexpected_keys = [k for k in unexpected_keys if not (k.endswith('total_params') or k.endswith('total_ops'))]
+        print(f"Loaded pretrained model from {args.pretrained_model}")
+        if len(missing_keys) > 0:
+            print('Missing Keys: {}'.format(missing_keys))
+        if len(unexpected_keys) > 0:
+            print('Unexpected Keys: {}'.format(unexpected_keys))
+
+    if args.freeze_pretrained:
+        trainable = []
+        frozen = []
+        for n, p in model.named_parameters():
+            keep_trainable = any(k in n for k in args.trainable_keywords)
+            p.requires_grad_(keep_trainable)
+            if keep_trainable:
+                trainable.append(n)
+            else:
+                frozen.append(n)
+        print(f"Frozen pretrained parameters: {len(frozen)} tensors")
+        print(f"Trainable new parameters: {len(trainable)} tensors")
+        for n in trainable:
+            print(f"trainable: {n}")
+
     model.to(device)
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
