@@ -155,6 +155,11 @@ class ConvertToCocoDict(object):
             img = img.astype(np.float32) / 255.0
         return img.astype(np.float32)
 
+    def _to_chw_tensor(self, image):
+        if image.ndim == 2:
+            image = image[:, :, None]
+        return torch.as_tensor(np.ascontiguousarray(image.transpose(2, 0, 1)))
+
     def __call__(self, img_id, path, target):
 
         file_name = os.path.join(self.root, path)
@@ -174,13 +179,13 @@ class ConvertToCocoDict(object):
 
 
         if self.augmentations is None:
-            record['image'] = torch.as_tensor(np.ascontiguousarray(img.transpose(2, 0, 1)))
+            record['image'] = self._to_chw_tensor(img)
             record['instances'] = annotations_to_instances(target, (h, w), mask_format="polygon")
         else:
             aug_input = T.AugInput(img)
             transforms = self.augmentations(aug_input)
             image = aug_input.image
-            record['image'] = torch.as_tensor(np.ascontiguousarray(image.transpose(2, 0, 1)))
+            record['image'] = self._to_chw_tensor(image)
             
             annos = [
                 transform_instance_annotations(
