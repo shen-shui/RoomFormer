@@ -21,8 +21,8 @@ INVALID_SCENE_IDS = {
 }
 
 
-def split_for_scene(scene_id):
-    sid = int(scene_id)
+def split_for_scene(scene_key):
+    sid = int(scene_key)
     if sid < 3000:
         return "train"
     if sid < 3250:
@@ -30,8 +30,8 @@ def split_for_scene(scene_id):
     return "test"
 
 
-def load_used_scene_ids(processed_root):
-    scene_ids = set()
+def load_processed_scenes(processed_root):
+    scenes = {}
     annotations_dir = processed_root / "annotations"
     for split in ("train", "val", "test"):
         ann_path = annotations_dir / f"{split}.json"
@@ -40,8 +40,14 @@ def load_used_scene_ids(processed_root):
         with ann_path.open("r") as f:
             data = json.load(f)
         for image in data.get("images", []):
-            scene_ids.add(Path(image["file_name"]).stem)
-    return scene_ids
+            file_name = image["file_name"]
+            stem = Path(file_name).stem
+            try:
+                scene_key = int(stem)
+            except ValueError:
+                scene_key = int(image["id"])
+            scenes[scene_key] = {"split": split, "file_name": file_name}
+    return scenes
 
 
 def camera_center(path):
@@ -166,7 +172,7 @@ def main():
     parser.add_argument("--limit", default=0, type=int)
     args = parser.parse_args()
 
-    used_scene_ids = load_used_scene_ids(args.processed_root)
+    processed_scenes = load_processed_scenes(args.processed_root)
     for split in ("train", "val", "test"):
         (args.output_root / split).mkdir(parents=True, exist_ok=True)
 
@@ -174,15 +180,20 @@ def main():
     written = skipped = 0
     for scene_path in scenes:
         scene_id = scene_path.name.split("_")[-1]
-        if used_scene_ids and scene_id not in used_scene_ids:
+        scene_key = int(scene_id)
+        if processed_scenes and scene_key not in processed_scenes:
             skipped += 1
             continue
-        if int(scene_id) in INVALID_SCENE_IDS:
+        if scene_key in INVALID_SCENE_IDS:
             skipped += 1
             continue
 
-        split = split_for_scene(scene_id)
-        out_path = args.output_root / split / f"{scene_id}.png"
+        processed = processed_scenes.get(
+            scene_key,
+            {"split": split_for_scene(scene_key), "file_name": f"{scene_id}.png"},
+        )
+        split = processed["split"]
+        out_path = args.output_root / split / processed["file_name"]
         if out_path.exists():
             skipped += 1
             continue
