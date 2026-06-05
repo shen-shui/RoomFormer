@@ -120,6 +120,12 @@ def evaluate(model, criterion, dataset_name, data_loader, device):
             elif dataset_name == 'scenecad':
                 gt_polys = [gt_instances[i].gt_masks.polygons[0][0].reshape(-1,2).astype(np.int)]
                 evaluator = Evaluator_SceneCAD()
+            elif dataset_name == 'floornet':
+                gt_polys = [
+                    poly[0].reshape(-1, 2).astype(np.int32)
+                    for poly in gt_instances[i].gt_masks.polygons
+                ]
+                evaluator = Evaluator_SceneCAD()
             
             print("Running Evaluation for scene %s" % scene_ids[i])
 
@@ -168,7 +174,7 @@ def evaluate(model, criterion, dataset_name, data_loader, device):
                                                             room_types=room_types, 
                                                             window_door_lines=window_doors, 
                                                             window_door_lines_types=window_doors_types)
-            elif dataset_name == 'scenecad':
+            elif dataset_name == 'scenecad' or dataset_name == 'floornet':
                 quant_result_dict_scene = evaluator.evaluate_scene(room_polys=room_polys, gt_polys=gt_polys)
 
             if 'room_iou' in quant_result_dict_scene:
@@ -270,6 +276,12 @@ def evaluate_floor(model, dataset_name, data_loader, device, output_dir, plot_pr
             elif dataset_name == 'scenecad':
                 gt_polys = [gt_instances[i].gt_masks.polygons[0][0].reshape(-1,2).astype(np.int)]
                 evaluator = Evaluator_SceneCAD()
+            elif dataset_name == 'floornet':
+                gt_polys = [
+                    poly[0].reshape(-1, 2).astype(np.int32)
+                    for poly in gt_instances[i].gt_masks.polygons
+                ]
+                evaluator = Evaluator_SceneCAD()
 
             print("Running Evaluation for scene %s" % scene_ids[i])
 
@@ -318,7 +330,7 @@ def evaluate_floor(model, dataset_name, data_loader, device, output_dir, plot_pr
                                                             window_door_lines=window_doors, 
                                                             window_door_lines_types=window_doors_types)
     
-            elif dataset_name == 'scenecad':
+            elif dataset_name == 'scenecad' or dataset_name == 'floornet':
                 quant_result_dict_scene = evaluator.evaluate_scene(room_polys=room_polys, gt_polys=gt_polys)
 
             if quant_result_dict is None:

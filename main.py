@@ -170,8 +170,7 @@ def main(args):
                 break
         return out
 
-    for n, p in model.named_parameters():
-        print(n)
+    # Keep training logs focused; dumping every parameter name makes smoke tests hard to read.
 
     param_dicts = [
         {
