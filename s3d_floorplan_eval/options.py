@@ -7,7 +7,7 @@ file_dir = os.path.dirname(__file__)  # the directory that options.py resides in
 
 class MCSSOptions:
     def __init__(self):
-        self.parser = argparse.ArgumentParser(description="MCSSFloor options")
+        self.parser = argparse.ArgumentParser(description="MCSSFloor options", add_help=False)
 
         # PATHS
         self.parser.add_argument("--mcts_path",
