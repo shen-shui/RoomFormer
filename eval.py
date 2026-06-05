@@ -122,9 +122,6 @@ def main(args):
                                  drop_last=False, collate_fn=trivial_batch_collator, num_workers=args.num_workers,
                                  pin_memory=True)
 
-    for n, p in model.named_parameters():
-        print(n)
-
     output_dir = Path(args.output_dir)
 
     checkpoint = torch.load(args.checkpoint, map_location='cpu')

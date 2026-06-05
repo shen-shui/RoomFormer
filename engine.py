@@ -385,7 +385,7 @@ def evaluate_floor(model, dataset_name, data_loader, device, output_dir, plot_pr
     for metric in metric_category:
         prec = quant_result_dict[metric+'_prec']
         rec = quant_result_dict[metric+'_rec']
-        f1 = 2*prec*rec/(prec+rec)
+        f1 = 0 if prec + rec == 0 else 2*prec*rec/(prec+rec)
         quant_result_dict[metric+'_f1'] = f1
 
     print("*************************************************")
