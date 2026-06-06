@@ -56,6 +56,27 @@ def get_args_parser():
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--room_score_threshold", default=0.5, type=float)
     parser.add_argument("--min_room_area", default=100.0, type=float)
+    parser.add_argument(
+        "--density_transform",
+        default="none",
+        choices=("none", "percentile", "equalize"),
+        help="Optional per-image normalization for real reconstruction density maps.",
+    )
+    parser.add_argument("--percentile_low", default=1.0, type=float)
+    parser.add_argument("--percentile_high", default=99.5, type=float)
+    parser.add_argument(
+        "--density_gamma",
+        default=1.0,
+        type=float,
+        help="Gamma applied after normalization. Values below 1 brighten weak densities.",
+    )
+    parser.add_argument(
+        "--density_dilate",
+        default=0,
+        type=int,
+        help="Optional dilation iterations for sparse density maps.",
+    )
+    parser.add_argument("--save_input_density", action="store_true")
     return parser
 
 
@@ -84,6 +105,34 @@ def polygons_from_outputs(outputs, room_score_threshold, min_room_area):
     return batch_polys
 
 
+def transform_density_sample(sample, args):
+    density = sample.detach().cpu().numpy()
+    density = np.squeeze(density).astype(np.float32)
+
+    if args.density_transform == "percentile":
+        lo, hi = np.percentile(density, [args.percentile_low, args.percentile_high])
+        if hi > lo:
+            density = np.clip((density - lo) / (hi - lo), 0.0, 1.0)
+    elif args.density_transform == "equalize":
+        image = np.clip(density * 255.0, 0, 255).astype(np.uint8)
+        density = cv2.equalizeHist(image).astype(np.float32) / 255.0
+    else:
+        density = np.clip(density, 0.0, 1.0)
+
+    if args.density_gamma != 1.0:
+        gamma = max(args.density_gamma, 1e-6)
+        density = np.power(np.clip(density, 0.0, 1.0), gamma)
+
+    if args.density_dilate > 0:
+        image = np.clip(density * 255.0, 0, 255).astype(np.uint8)
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        image = cv2.dilate(image, kernel, iterations=args.density_dilate)
+        density = image.astype(np.float32) / 255.0
+
+    density = torch.as_tensor(density[None, :, :], dtype=sample.dtype, device=sample.device)
+    return density
+
+
 def save_prediction_maps(output_dir, scene_id, sample, room_polys):
     floorplan_map = plot_floorplan_with_regions([np.array(r) for r in room_polys], scale=1000)
     cv2.imwrite(str(output_dir / f"{scene_id}_pred_floorplan.png"), floorplan_map)
@@ -97,6 +146,12 @@ def save_prediction_maps(output_dir, scene_id, sample, room_polys):
 
     pred_room_map = np.clip(pred_room_map + density_map, 0, 255)
     cv2.imwrite(str(output_dir / f"{scene_id}_pred_room_map.png"), pred_room_map)
+
+
+def save_input_density(output_dir, scene_id, sample):
+    density_map = np.squeeze((sample * 255).cpu().numpy())
+    density_map = np.clip(density_map, 0, 255).astype(np.uint8)
+    cv2.imwrite(str(output_dir / f"{scene_id}_input_density.png"), density_map)
 
 
 @torch.no_grad()
@@ -141,7 +196,10 @@ def main(args):
 
     results = []
     for batched_inputs in data_loader_eval:
-        samples = [x["image"].to(device) for x in batched_inputs]
+        samples = [
+            transform_density_sample(x["image"].to(device), args)
+            for x in batched_inputs
+        ]
         scene_ids = [x["image_id"] for x in batched_inputs]
         file_names = [x["file_name"] for x in batched_inputs]
 
@@ -153,12 +211,17 @@ def main(args):
         )
 
         for sample, scene_id, file_name, room_polys in zip(samples, scene_ids, file_names, batch_polys):
+            if args.save_input_density:
+                save_input_density(output_dir, scene_id, sample)
             save_prediction_maps(output_dir, scene_id, sample, room_polys)
             results.append({
                 "image_id": int(scene_id),
                 "file_name": file_name,
                 "num_rooms": len(room_polys),
                 "polygons": [poly.tolist() for poly in room_polys],
+                "density_transform": args.density_transform,
+                "density_gamma": args.density_gamma,
+                "density_dilate": args.density_dilate,
             })
             print(f"scene {scene_id}: rooms={len(room_polys)} file={file_name}")
 
