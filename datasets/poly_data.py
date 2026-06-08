@@ -133,6 +133,7 @@ def build(image_set, args):
 
     img_folder, ann_file = PATHS[image_set]
     
-    dataset = MultiPoly(img_folder, ann_file, transforms=make_poly_transforms(image_set), semantic_classes=args.semantic_classes)
+    transforms = None if image_set == "train" and getattr(args, "disable_train_aug", False) else make_poly_transforms(image_set)
+    dataset = MultiPoly(img_folder, ann_file, transforms=transforms, semantic_classes=args.semantic_classes)
     
     return dataset

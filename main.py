@@ -97,6 +97,11 @@ def get_args_parser():
     # dataset parameters
     parser.add_argument('--dataset_name', default='stru3d')
     parser.add_argument('--dataset_root', default='data/stru3d', type=str)
+    parser.add_argument(
+        '--disable_train_aug',
+        action='store_true',
+        help='disable train-time geometric augmentations for single-sample sanity checks',
+    )
 
     parser.add_argument('--output_dir', default='output',
                         help='path where to save, empty for no saving')
